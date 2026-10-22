@@ -1,87 +1,38 @@
-// The first screen. A working example of the one pattern every screen uses:
-// load from this app's server with api() and show errors in words. While the
-// server wakes, the app's frame covers the screen on its own (app/_layout.tsx).
-// Replace it with the real app.
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as SecureStore from 'expo-secure-store';
 import { api } from '../lib/api';
 
-type Item = { id: string; text: string; createdAt: string };
-
-export default function Home() {
-  const [items, setItems] = useState<Item[] | null>(null);
-  const [draft, setDraft] = useState('');
-  const [error, setError] = useState('');
-
-  const load = useCallback(async () => {
-    setError('');
-    try {
-      setItems(await api<Item[]>('GET', '/api/items'));
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const add = async () => {
-    const text = draft.trim();
-    if (!text) return;
-    setError('');
-    try {
-      const item = await api<Item>('POST', '/api/items', { text });
-      setItems((prev) => [item, ...(prev || [])]);
-      setDraft('');
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  return (
-    <SafeAreaView style={styles.screen}>
-      <Text style={styles.title}>My App</Text>
-      <View style={styles.row}>
-        <TextInput
-          style={styles.input}
-          value={draft}
-          onChangeText={setDraft}
-          onSubmitEditing={add}
-          placeholder="Add an item"
-          placeholderTextColor="#8a8aa0"
-          returnKeyType="done"
-        />
-        <Pressable style={styles.button} onPress={add} accessibilityRole="button" accessibilityLabel="Add">
-          <Ionicons name="add" size={24} color="#fff" />
-        </Pressable>
-      </View>
-      {!!error && (
-        <Pressable onPress={load} accessibilityRole="button">
-          <Text style={styles.error}>{error} Tap to retry.</Text>
-        </Pressable>
-      )}
-      {items === null && !error ? (
-        <ActivityIndicator style={{ marginTop: 32 }} />
-      ) : (
-        <FlatList
-          data={items || []}
-          keyExtractor={(i) => i.id}
-          renderItem={({ item }) => <Text style={styles.item}>{item.text}</Text>}
-          ListEmptyComponent={<Text style={styles.note}>Nothing yet. Add the first item.</Text>}
-        />
-      )}
-    </SafeAreaView>
-  );
+type Ingredient={name:string; quantity?:number; unit?:string};
+type Recipe={id:string; title:string; description:string; prep:number; cook:number; servings:number; difficulty:string; labels:string[]; equipment:string[]; ingredients:Ingredient[]; steps:string[]};
+type Pantry=Ingredient & {id:string; useBy?:string};
+type State={pantry:Pantry[]; saved:string[]; plan:Record<string,Record<string,string>>; shopping:Ingredient[]; preferences:{diet:string; skill:string; budget:string; time:number; mood:string; allergies:string[]}};
+const blank:State={pantry:[],saved:[],plan:{},shopping:[],preferences:{diet:'No specific preference',skill:'Comfortable with basics',budget:'Flexible',time:20,mood:'Not sure',allergies:[]}};
+const nav=[['match','Meal Matcher','sparkles'],['pantry','Pantry & Fridge','leaf'],['plan','Meal Planner','calendar'],['shop','Shopping List','cart'],['prefs','Preferences','settings']] as const;
+const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun']; const slots=['Breakfast','Lunch','Dinner'];
+const key='mindfulmeal-device';
+export default function MindfulMeal(){
+ const [tab,setTab]=useState<typeof nav[number][0]>('match'); const [recipes,setRecipes]=useState<Recipe[]>([]); const [state,setState]=useState<State>(blank); const [device,setDevice]=useState(''); const [loading,setLoading]=useState(true); const [selected,setSelected]=useState<Recipe|null>(null); const [query,setQuery]=useState(''); const [assistantReply,setAssistantReply]=useState(''); const [asking,setAsking]=useState(false); const [step,setStep]=useState(0); const [ingredient,setIngredient]=useState(''); const [timer,setTimer]=useState<number|null>(null);
+ useEffect(()=>{(async()=>{let d=await SecureStore.getItemAsync(key); if(!d){d=`guest-${Date.now()}-${Math.random().toString(36).slice(2)}`;await SecureStore.setItemAsync(key,d)}setDevice(d);const [r,s]=await Promise.all([api<Recipe[]>('GET','/api/recipes'),api<State>('GET',`/api/mindful-state?device=${encodeURIComponent(d)}`)]);setRecipes(r);setState(s||blank);setLoading(false)})().catch(()=>setLoading(false))},[]);
+ const save=(next:State)=>{setState(next);if(device) api('PUT','/api/mindful-state',{device,state:next}).catch(()=>Alert.alert('Could not save','Your changes will remain on this screen.'))};
+ const available=useMemo(()=>new Set(state.pantry.map(x=>x.name.toLowerCase())),[state.pantry]);
+ const matches=useMemo(()=>recipes.filter(r=>{const hay=[r.title,r.description,...r.labels,...r.ingredients.map(i=>i.name)].join(' ').toLowerCase();return hay.includes(query.trim().toLowerCase())&&!r.ingredients.some(i=>state.preferences.allergies.some(a=>i.name.toLowerCase().includes(a.toLowerCase()))) }).map(r=>({...r,have:r.ingredients.filter(i=>available.has(i.name.toLowerCase())).length,score:r.ingredients.filter(i=>available.has(i.name.toLowerCase())).length/r.ingredients.length})).sort((a,b)=>b.score-a.score).slice(0,3),[recipes,query,available,state.preferences.allergies]);
+ const addPantry=()=>{let n=ingredient.trim();if(!n)return;save({...state,pantry:[...state.pantry,{id:Date.now().toString(),name:n}]});setIngredient('')};
+ const askAssistant=async()=>{if(!query.trim()||asking)return;setAsking(true);setAssistantReply('');try{const r=await api<{text:string}>('POST','/api/meal-assistant',{message:query,pantry:state.pantry,preferences:state.preferences});setAssistantReply(r.text)}catch(e){setAssistantReply((e as Error).message)}finally{setAsking(false)}};
+ const toggleSave=(id:string)=>save({...state,saved:state.saved.includes(id)?state.saved.filter(x=>x!==id):[...state.saved,id]});
+ const addMissing=(r:Recipe)=>{const newItems=r.ingredients.filter(i=>!available.has(i.name.toLowerCase())&&!state.shopping.some(s=>s.name===i.name));save({...state,shopping:[...state.shopping,...newItems]});Alert.alert('Added to shopping list','Missing ingredients are ready for your next grocery run.')};
+ if(loading)return <SafeAreaView style={s.center}><ActivityIndicator color="#38bdf8" size="large"/><Text style={s.muted}>Preparing your kitchen…</Text></SafeAreaView>;
+ const content=tab==='match'?<Matcher/>:tab==='pantry'?<Pantry/>:tab==='plan'?<Planner/>:tab==='shop'?<Shop/>:<Preferences/>;
+ function Matcher(){return <ScrollView contentContainerStyle={s.content}><Text style={s.kicker}>BETTER FOOD CHOICES. A CALMER DAY.</Text><Text style={s.h1}>What can we make?</Text><Text style={s.body}>Tell MindfulMeal what is on hand, then choose a practical next meal.</Text><View style={s.checkin}><Text style={s.label}>What kind of day are you having?</Text><View style={s.wrap}>{['Low energy','Stressed','Feeling good','Focused','Not sure'].map(x=><Chip key={x} active={state.preferences.mood===x} label={x} onPress={()=>save({...state,preferences:{...state.preferences,mood:x}})}/>)}</View></View><TextInput value={query} onChangeText={setQuery} placeholder="I have eggs, spinach, and rice…" placeholderTextColor="#64748b" style={s.input}/><Pressable onPress={askAssistant} style={s.ask} accessibilityRole="button"><Ionicons name="sparkles" size={18} color="#fff"/><Text style={s.primaryText}>{asking?'Thinking…':'Ask Meal Assistant'}</Text></Pressable>{!!assistantReply&&<View style={s.aiReply}><Text style={s.label}>Meal Assistant</Text><Text style={s.body}>{assistantReply}</Text></View>}<Text style={s.section}>Recommended for you</Text>{matches.map(r=><RecipeCard key={r.id} r={r}/>) }{!matches.length&&<Empty text="No safe matches yet. Try fewer filters or add pantry ingredients."/>}</ScrollView>}
+ function RecipeCard({r}:{r:any}){return <View style={s.card}><View style={s.recipeIcon}><Ionicons name="restaurant-outline" size={27} color="#0f172a"/></View><View style={{flex:1}}><Text style={s.cardTitle}>{r.title}</Text><Text style={s.small}>{r.prep+r.cook} min · {r.difficulty} · {r.have} of {r.ingredients.length} ingredients</Text><Text style={s.reason}>{r.have===r.ingredients.length?'Ready with your pantry':'Uses ingredients you already have'}</Text><View style={s.cardActions}><Pressable onPress={()=>setSelected(r)} style={s.primary} accessibilityRole="button"><Text style={s.primaryText}>View recipe</Text></Pressable><Pressable onPress={()=>toggleSave(r.id)} style={s.iconBtn} accessibilityRole="button" accessibilityLabel="Save recipe"><Ionicons name={state.saved.includes(r.id)?'heart':'heart-outline'} size={22} color="#0f172a"/></Pressable></View></View></View>}
+ function Pantry(){return <ScrollView contentContainerStyle={s.content}><Text style={s.h1}>Pantry & Fridge</Text><Text style={s.body}>Use what you have before it goes to waste.</Text><View style={s.addrow}><TextInput value={ingredient} onChangeText={setIngredient} onSubmitEditing={addPantry} placeholder="Add an ingredient" placeholderTextColor="#64748b" style={[s.input,{flex:1}]}/><Pressable style={s.add} onPress={addPantry} accessibilityRole="button"><Ionicons name="add" size={24} color="#fff"/></Pressable></View>{state.pantry.map(p=><View key={p.id} style={s.listRow}><Ionicons name="leaf-outline" size={20} color="#38bdf8"/><Text style={s.listText}>{p.name}</Text><Pressable onPress={()=>save({...state,pantry:state.pantry.filter(x=>x.id!==p.id)})} accessibilityRole="button"><Ionicons name="close-circle-outline" size={23} color="#64748b"/></Pressable></View>)}{!state.pantry.length&&<Empty text="Your kitchen is empty. Add ingredients to unlock better matches."/>}</ScrollView>}
+ function Planner(){return <ScrollView contentContainerStyle={s.content}><Text style={s.h1}>Meal Planner</Text><Text style={s.body}>A flexible week, built around real life.</Text>{days.map((d,di)=><View key={d} style={s.day}><Text style={s.dayName}>{d}</Text>{slots.map(slot=>{const id=state.plan[d]?.[slot];const r=recipes.find(x=>x.id===id);return <Pressable key={slot} style={s.slot} onPress={()=>{const pick=recipes[(di+slots.indexOf(slot))%recipes.length];save({...state,plan:{...state.plan,[d]:{...state.plan[d],[slot]:pick.id}}})}} accessibilityRole="button"><Text style={s.slotLabel}>{slot}</Text><Text style={s.slotMeal}>{r?.title||(slot==='Dinner'?'Add a simple dinner':'Add meal')}</Text><Ionicons name="chevron-forward" size={16} color="#64748b"/></Pressable>})}</View>)}<Pressable style={s.widePrimary} onPress={()=>{const needed=Object.values(state.plan).flatMap(day=>Object.values(day)).flatMap(id=>recipes.find(r=>r.id===id)?.ingredients||[]).filter(i=>!available.has(i.name.toLowerCase()));save({...state,shopping:needed});setTab('shop')}} accessibilityRole="button"><Text style={s.primaryText}>Generate shopping list</Text></Pressable></ScrollView>}
+ function Shop(){return <ScrollView contentContainerStyle={s.content}><Text style={s.h1}>Shopping List</Text><Text style={s.body}>Practical groceries for your plan.</Text>{state.shopping.map((item,i)=><Pressable key={`${item.name}-${i}`} style={s.listRow} onPress={()=>save({...state,shopping:state.shopping.filter((_,n)=>n!==i)})} accessibilityRole="button"><Ionicons name="ellipse-outline" size={22} color="#38bdf8"/><Text style={s.listText}>{item.quantity?`${item.quantity} ${item.unit||''} `:''}{item.name}</Text><Ionicons name="checkmark" size={20} color="#64748b"/></Pressable>)}{!state.shopping.length&&<Empty text="Your list is clear. Add missing ingredients from a recipe or meal plan."/>}<Pressable style={s.outline} onPress={()=>save({...state,shopping:[]})} accessibilityRole="button"><Text style={s.outlineText}>Clear purchased items</Text></Pressable></ScrollView>}
+ function Preferences(){return <ScrollView contentContainerStyle={s.content}><Text style={s.h1}>Preferences</Text><Text style={s.body}>Your defaults guide every recommendation.</Text>{[['Dietary preference','diet',['No specific preference','Vegetarian','Vegan','Pescatarian']],['Cooking comfort','skill',['Beginner','Comfortable with basics','Experienced']],['Budget','budget',['Flexible','Affordable','Plan ahead']]].map(([title,k,opts]:any)=><View key={k} style={s.pref}><Text style={s.label}>{title}</Text><View style={s.wrap}>{opts.map((x:string)=><Chip key={x} active={(state.preferences as any)[k]===x} label={x} onPress={()=>save({...state,preferences:{...state.preferences,[k]:x}})}/>)}</View></View>)}<Text style={s.label}>Allergies and exclusions</Text><TextInput placeholder="e.g. peanuts, shellfish" placeholderTextColor="#64748b" style={s.input} onSubmitEditing={e=>save({...state,preferences:{...state.preferences,allergies:e.nativeEvent.text.split(',').map(x=>x.trim()).filter(Boolean)}})}/><Text style={s.warning}>Always check labels and cross-contact information. Recipe data cannot guarantee allergy safety.</Text><Text style={s.section}>Saved meals</Text>{recipes.filter(r=>state.saved.includes(r.id)).map(r=><Pressable key={r.id} style={s.listRow} onPress={()=>setSelected(r)} accessibilityRole="button"><Ionicons name="heart" size={20} color="#38bdf8"/><Text style={s.listText}>{r.title}</Text></Pressable>)}</ScrollView>}
+ function Chip({label,active,onPress}:{label:string;active:boolean;onPress:()=>void}){return <Pressable onPress={onPress} style={[s.chip,active&&s.chipActive]} accessibilityRole="button"><Text style={[s.chipText,active&&s.chipTextActive]}>{label}</Text></Pressable>}
+ return <SafeAreaView style={s.screen}><View style={s.brand}><View style={s.logo}><Ionicons name="leaf" size={20} color="#0f172a"/></View><Text style={s.brandText}>MindfulMeal</Text><Text style={s.guest}>Guest</Text></View><View style={{flex:1}}>{content}</View><View style={s.nav}>{nav.map(([id,label,icon])=><Pressable key={id} onPress={()=>setTab(id)} style={s.navItem} accessibilityRole="button" accessibilityLabel={label}><Ionicons name={(tab===id?icon: `${icon}-outline`) as any} size={20} color={tab===id?'#38bdf8':'#64748b'}/><Text style={[s.navText,tab===id&&s.navActive]}>{label.split(' ')[0]}</Text></Pressable>)}</View><Modal visible={!!selected} animationType="slide"><SafeAreaView style={s.screen}>{selected&&<ScrollView contentContainerStyle={s.content}><Pressable onPress={()=>setSelected(null)} style={s.back} accessibilityRole="button"><Ionicons name="arrow-back" size={22} color="#0f172a"/><Text>Back</Text></Pressable><View style={s.hero}><Ionicons name="restaurant" size={45} color="#0f172a"/></View><Text style={s.h1}>{selected.title}</Text><Text style={s.body}>{selected.description}</Text><Text style={s.section}>Ingredients</Text>{selected.ingredients.map((i,n)=><Text key={n} style={s.ingredient}>• {i.quantity||''} {i.unit||''} {i.name}{available.has(i.name.toLowerCase())?'  · In your kitchen':'  · Needed'}</Text>)}<Pressable onPress={()=>addMissing(selected)} style={s.widePrimary} accessibilityRole="button"><Text style={s.primaryText}>Add missing to shopping list</Text></Pressable><Text style={s.section}>Cooking mode</Text><View style={s.step}><Text style={s.stepNumber}>Step {step+1} of {selected.steps.length}</Text><Text style={s.stepText}>{selected.steps[step]}</Text>{timer!==null&&<Text style={s.timer}>{timer} minute timer ready</Text>}<View style={s.cardActions}><Pressable onPress={()=>setStep(Math.max(0,step-1))} style={s.outline} accessibilityRole="button"><Text style={s.outlineText}>Previous</Text></Pressable><Pressable onPress={()=>setTimer(5)} style={s.outline} accessibilityRole="button"><Text style={s.outlineText}>Set 5 min</Text></Pressable><Pressable onPress={()=>setStep(Math.min(selected.steps.length-1,step+1))} style={s.primary} accessibilityRole="button"><Text style={s.primaryText}>Next</Text></Pressable></View></View></ScrollView>}</SafeAreaView></Modal></SafeAreaView>
 }
-
-const styles = StyleSheet.create({
-  screen: { flex: 1, paddingHorizontal: 20, backgroundColor: '#0f0f14' },
-  title: { fontSize: 28, fontWeight: '700', color: '#fff', marginTop: 16, marginBottom: 12 },
-  row: { flexDirection: 'row', gap: 10, marginBottom: 12 },
-  input: { flex: 1, backgroundColor: '#1c1c26', color: '#fff', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16 },
-  button: { backgroundColor: '#7c5cff', borderRadius: 12, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
-  item: { color: '#e8e8f0', fontSize: 17, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#2a2a36' },
-  note: { color: '#8a8aa0', fontSize: 15, marginVertical: 8 },
-  error: { color: '#f87171', fontSize: 15, marginVertical: 8 },
-});
+function Empty({text}:{text:string}){return <View style={s.empty}><Ionicons name="sparkles-outline" size={28} color="#38bdf8"/><Text style={s.muted}>{text}</Text></View>}
+const s=StyleSheet.create({screen:{flex:1,backgroundColor:'#e2e8f0'},center:{flex:1,alignItems:'center',justifyContent:'center',gap:14,backgroundColor:'#0f172a'},content:{padding:20,paddingBottom:32,gap:14},brand:{height:58,paddingHorizontal:20,alignItems:'center',flexDirection:'row',gap:8,backgroundColor:'#0f172a'},logo:{width:30,height:30,borderRadius:15,backgroundColor:'#38bdf8',alignItems:'center',justifyContent:'center'},brandText:{color:'#fff',fontSize:18,fontWeight:'800'},guest:{marginLeft:'auto',color:'#cbd5e1',fontSize:13},h1:{fontSize:30,fontWeight:'800',color:'#0f172a',letterSpacing:-.7},kicker:{fontSize:11,fontWeight:'800',letterSpacing:1.1,color:'#0284c7'},body:{fontSize:15,color:'#475569',lineHeight:22},label:{fontSize:14,fontWeight:'700',color:'#0f172a',marginBottom:8},section:{fontSize:19,fontWeight:'800',color:'#0f172a',marginTop:8},checkin:{backgroundColor:'#fff',borderRadius:18,padding:16},wrap:{flexDirection:'row',flexWrap:'wrap',gap:8},chip:{paddingHorizontal:12,paddingVertical:9,borderRadius:20,backgroundColor:'#e2e8f0'},chipActive:{backgroundColor:'#38bdf8'},chipText:{fontSize:13,color:'#334155'},chipTextActive:{fontWeight:'700',color:'#0f172a'},input:{backgroundColor:'#fff',borderRadius:14,paddingHorizontal:14,paddingVertical:14,fontSize:16,color:'#0f172a',borderWidth:1,borderColor:'#cbd5e1'},card:{backgroundColor:'#fff',borderRadius:18,padding:14,flexDirection:'row',gap:12,shadowColor:'#0f172a',shadowOpacity:.07,shadowRadius:10,elevation:2},recipeIcon:{width:53,height:53,borderRadius:16,backgroundColor:'#38bdf8',justifyContent:'center',alignItems:'center'},cardTitle:{fontSize:17,fontWeight:'800',color:'#0f172a'},small:{fontSize:12,color:'#64748b',marginTop:3},reason:{fontSize:12,fontWeight:'700',color:'#0284c7',marginTop:7},cardActions:{flexDirection:'row',gap:8,alignItems:'center',marginTop:10},primary:{backgroundColor:'#0f172a',borderRadius:11,paddingHorizontal:13,paddingVertical:10},primaryText:{color:'#fff',fontWeight:'800',fontSize:13},iconBtn:{padding:8},addrow:{flexDirection:'row',gap:10},add:{width:50,borderRadius:14,backgroundColor:'#0f172a',alignItems:'center',justifyContent:'center'},listRow:{minHeight:52,backgroundColor:'#fff',borderRadius:14,paddingHorizontal:14,flexDirection:'row',alignItems:'center',gap:12},listText:{fontSize:16,color:'#0f172a',flex:1},empty:{padding:28,alignItems:'center',gap:10,backgroundColor:'#fff',borderRadius:18},muted:{color:'#64748b',textAlign:'center',lineHeight:20},day:{backgroundColor:'#fff',borderRadius:17,padding:13,gap:8},dayName:{fontWeight:'800',color:'#0f172a',fontSize:16},slot:{flexDirection:'row',alignItems:'center',gap:8,paddingVertical:7},slotLabel:{width:70,fontSize:12,fontWeight:'700',color:'#64748b'},slotMeal:{flex:1,color:'#0f172a',fontSize:14},widePrimary:{backgroundColor:'#0f172a',borderRadius:14,alignItems:'center',paddingVertical:15,marginTop:4},ask:{backgroundColor:'#0f172a',borderRadius:14,alignItems:'center',justifyContent:'center',flexDirection:'row',gap:8,paddingVertical:14},aiReply:{backgroundColor:'#fff',padding:15,borderRadius:17,gap:4},outline:{borderWidth:1,borderColor:'#94a3b8',borderRadius:11,paddingHorizontal:12,paddingVertical:9},outlineText:{fontWeight:'700',color:'#0f172a',fontSize:13},pref:{backgroundColor:'#fff',padding:15,borderRadius:17,gap:3},warning:{color:'#92400e',backgroundColor:'#fef3c7',padding:12,borderRadius:12,fontSize:13,lineHeight:19},nav:{height:67,backgroundColor:'#fff',borderTopWidth:1,borderColor:'#cbd5e1',flexDirection:'row',justifyContent:'space-around'},navItem:{flex:1,alignItems:'center',justifyContent:'center',gap:3},navText:{fontSize:10,color:'#64748b'},navActive:{color:'#0284c7',fontWeight:'800'},back:{flexDirection:'row',gap:7,alignItems:'center',alignSelf:'flex-start',paddingVertical:8},hero:{height:135,backgroundColor:'#38bdf8',borderRadius:22,alignItems:'center',justifyContent:'center'},ingredient:{color:'#334155',fontSize:15,lineHeight:27},step:{backgroundColor:'#fff',padding:18,borderRadius:18,gap:12},stepNumber:{fontWeight:'800',color:'#0284c7'},stepText:{fontSize:18,fontWeight:'600',color:'#0f172a',lineHeight:26},timer:{color:'#0284c7',fontWeight:'800'}});

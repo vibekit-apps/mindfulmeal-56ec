@@ -34,17 +34,38 @@ const MIME = {
 
 // ── API routes ────────────────────────────────────────────────────────
 // Key is "METHOD /path". Handlers get (req, res) and may be async.
+const DEFAULT_STATE = { pantry: [], saved: [], plan: {}, shopping: [], preferences: { diet: 'No specific preference', skill: 'Comfortable with basics', budget: 'Flexible', time: 20, mood: 'Not sure', allergies: [] } };
+const RECIPES = [
+  { id: 'lemon-rice', title: 'Lemon Spinach Rice Bowl', description: 'A bright, flexible bowl for a quick lunch or dinner.', prep: 8, cook: 12, servings: 2, difficulty: 'Beginner', labels: ['Vegetarian', 'Quick'], equipment: ['Stove'], ingredients: [{ name: 'rice', quantity: 1, unit: 'cup' }, { name: 'spinach', quantity: 2, unit: 'cups' }, { name: 'lemon', quantity: 1 }, { name: 'egg', quantity: 2 }, { name: 'olive oil', quantity: 1, unit: 'tbsp' }], steps: ['Cook the rice according to its package directions.', 'Warm olive oil in a pan and wilt the spinach.', 'Fold in rice, lemon juice, and cooked eggs. Season to taste.'] },
+  { id: 'tomato-pasta', title: 'Tomato Garlic Pasta', description: 'A simple pantry pasta with a generous tomato sauce.', prep: 5, cook: 15, servings: 2, difficulty: 'Beginner', labels: ['Vegetarian', 'Affordable'], equipment: ['Stove'], ingredients: [{ name: 'pasta', quantity: 8, unit: 'oz' }, { name: 'tomatoes', quantity: 2 }, { name: 'garlic', quantity: 2, unit: 'cloves' }, { name: 'olive oil', quantity: 1, unit: 'tbsp' }, { name: 'parmesan', quantity: 2, unit: 'tbsp' }], steps: ['Boil pasta in salted water.', 'Sauté garlic in olive oil, then add tomatoes.', 'Toss pasta with sauce and finish with parmesan.'] },
+  { id: 'chickpea-wrap', title: 'Crispy Chickpea Wrap', description: 'A satisfying wrap that makes practical use of pantry staples.', prep: 10, cook: 10, servings: 2, difficulty: 'Comfortable', labels: ['Vegan option', 'Quick'], equipment: ['Stove'], ingredients: [{ name: 'chickpeas', quantity: 1, unit: 'can' }, { name: 'tortillas', quantity: 2 }, { name: 'lettuce', quantity: 2, unit: 'cups' }, { name: 'lemon', quantity: 1 }, { name: 'yogurt', quantity: 0.5, unit: 'cup' }], steps: ['Drain chickpeas and crisp them in a warm pan.', 'Mix yogurt with lemon for a quick sauce.', 'Fill tortillas with lettuce, chickpeas, and sauce.'] },
+  { id: 'oat-bowl', title: 'Warm Berry Oat Bowl', description: 'A low-effort breakfast with flexible fruit options.', prep: 3, cook: 7, servings: 1, difficulty: 'Beginner', labels: ['Vegetarian', 'Breakfast'], equipment: ['Microwave', 'Stove'], ingredients: [{ name: 'oats', quantity: 0.5, unit: 'cup' }, { name: 'milk', quantity: 1, unit: 'cup' }, { name: 'berries', quantity: 0.5, unit: 'cup' }, { name: 'cinnamon', quantity: 0.5, unit: 'tsp' }], steps: ['Combine oats and milk in a microwave-safe bowl or small pot.', 'Cook until creamy, stirring once.', 'Top with berries and cinnamon.'] }
+];
+
 const routes = {
   'GET /health': (req, res) => json(res, { status: 'ok', uptime: process.uptime(), release: currentRelease() }),
 
-  // Example data. Replace with your app's own.
-  'GET /api/items': (req, res) => json(res, store.read('items')),
-  'POST /api/items': async (req, res) => {
-    const { text } = await readBody(req);
-    if (!text || !String(text).trim()) return json(res, { error: 'Write something first' }, 400);
-    const item = { id: crypto.randomUUID(), text: String(text).trim().slice(0, 500), createdAt: new Date().toISOString() };
-    store.write('items', [item, ...store.read('items')]);
-    json(res, item, 201);
+  'POST /api/meal-assistant': async (req, res) => {
+    const { message, pantry = [], preferences = {} } = await readBody(req);
+    if (!message || typeof message !== 'string' || message.length > 1200) return json(res, { error: 'Please describe what you have or need.' }, 400);
+    if (!process.env.VIBEKIT_AI_URL || !process.env.VIBEKIT_AI_TOKEN) return json(res, { error: 'The meal assistant is not available yet. Try the recipe matches instead.' }, 503);
+    const prompt = `You are MindfulMeal's practical meal assistant. Give concise, non-medical cooking suggestions. Never claim allergy safety; tell people with allergies to check labels and cross-contact. Use only these known recipes when recommending a named recipe: ${JSON.stringify(RECIPES.map(r => ({ title:r.title, ingredients:r.ingredients.map(i=>i.name), time:r.prep+r.cook })))}. User message: ${message}. Pantry: ${JSON.stringify(pantry)}. Preferences: ${JSON.stringify(preferences)}. Answer in 100 words or fewer, with a practical next step.`;
+    const ai = await fetch(process.env.VIBEKIT_AI_URL, { method: 'POST', headers: { Authorization: `Bearer ${process.env.VIBEKIT_AI_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: prompt }] }) });
+    const data = await ai.json().catch(() => ({}));
+    if (!ai.ok) return json(res, { error: data.error || 'The meal assistant could not answer right now.' }, ai.status);
+    json(res, { text: data.text || 'I could not form a useful suggestion. Try a different question.' });
+  },
+  'GET /api/recipes': (req, res) => json(res, RECIPES),
+  'GET /api/mindful-state': (req, res) => {
+    const device = String(new URL(req.url, 'http://localhost').searchParams.get('device') || '');
+    if (!device || device.length > 100) return json(res, { error: 'Invalid device' }, 400);
+    json(res, store.read('mindful-states', {})[device] || DEFAULT_STATE);
+  },
+  'PUT /api/mindful-state': async (req, res) => {
+    const { device, state } = await readBody(req);
+    if (!device || typeof device !== 'string' || device.length > 100 || !state || typeof state !== 'object') return json(res, { error: 'Invalid meal data' }, 400);
+    const all = store.read('mindful-states', {}); all[device] = state; store.write('mindful-states', all);
+    json(res, state);
   },
 
   // Accounts (lib/auth.js). The app keeps the returned token (lib/api.ts).
