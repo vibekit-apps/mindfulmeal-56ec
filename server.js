@@ -52,10 +52,18 @@ const routes = {
     if (image && (typeof image !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(image) || image.length > 8_000_000)) return json(res, { error: 'Please choose a smaller JPG, PNG, or WebP photo.' }, 400);
     const prompt = `You are MindfulMeal's practical meal assistant. ${image ? 'Identify visible food ingredients cautiously; do not guess uncertain items.' : ''} Give concise, non-medical cooking suggestions. Never claim allergy safety; tell people with allergies to check labels and cross-contact. Use only these known recipes when recommending a named recipe: ${JSON.stringify(RECIPES.map(r => ({ title:r.title, ingredients:r.ingredients.map(i=>i.name), time:r.prep+r.cook })))}. User message: ${message}. Pantry: ${JSON.stringify(pantry)}. Preferences: ${JSON.stringify(preferences)}. Answer in 100 words or fewer, with a practical next step.`;
     const content = image ? [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: image } }] : prompt;
-    const ai = await fetch(process.env.VIBEKIT_AI_URL, { method: 'POST', headers: { Authorization: `Bearer ${process.env.VIBEKIT_AI_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content }] }) });
-    const data = await ai.json().catch(() => ({}));
-    if (!ai.ok) return json(res, { error: data.error || 'The meal assistant could not answer right now.' }, ai.status);
-    json(res, { text: data.text || 'I could not form a useful suggestion. Try a different question.' });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12_000);
+    let ai; let data;
+    try {
+      ai = await fetch(process.env.VIBEKIT_AI_URL, { method: 'POST', signal: controller.signal, headers: { Authorization: `Bearer ${process.env.VIBEKIT_AI_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content }] }) });
+      data = await ai.json().catch(() => ({}));
+    } catch { data = {}; }
+    clearTimeout(timeout);
+    const names = new Set([...(Array.isArray(pantry) ? pantry : []).map(x => String(x.name || x).toLowerCase()), ...String(message).toLowerCase().split(',').map(x => x.trim())]);
+    const suggestions = RECIPES.map(recipe => ({ recipe, matched: recipe.ingredients.filter(i => names.has(i.name.toLowerCase())), missing: recipe.ingredients.filter(i => !names.has(i.name.toLowerCase())) })).filter(x => !x.recipe.ingredients.some(i => (preferences.allergies || []).some(a => i.name.toLowerCase().includes(String(a).toLowerCase())))).sort((a,b) => b.matched.length - a.matched.length).slice(0, 3).map(x => ({ id:x.recipe.id, title:x.recipe.title, minutes:x.recipe.prep+x.recipe.cook, matched:x.matched.map(i=>i.name), missing:x.missing.map(i=>i.name), instructions:x.recipe.steps }));
+    if (!ai || !ai.ok || !data.text) return json(res, { text: suggestions.length ? `Here are practical matches based on what you entered. Open one to see the complete method and add missing items.` : 'No safe recipe match yet. Add a few pantry ingredients or adjust your allergy settings.', suggestions, fallback: true });
+    json(res, { text: data.text, suggestions, fallback: false });
   },
   'GET /api/recipes': (req, res) => json(res, RECIPES),
   'GET /api/mindful-state': (req, res) => {
