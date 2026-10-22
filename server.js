@@ -46,11 +46,13 @@ const routes = {
   'GET /health': (req, res) => json(res, { status: 'ok', uptime: process.uptime(), release: currentRelease() }),
 
   'POST /api/meal-assistant': async (req, res) => {
-    const { message, pantry = [], preferences = {} } = await readBody(req);
+    const { message, pantry = [], preferences = {}, image } = await readBody(req);
     if (!message || typeof message !== 'string' || message.length > 1200) return json(res, { error: 'Please describe what you have or need.' }, 400);
     if (!process.env.VIBEKIT_AI_URL || !process.env.VIBEKIT_AI_TOKEN) return json(res, { error: 'The meal assistant is not available yet. Try the recipe matches instead.' }, 503);
-    const prompt = `You are MindfulMeal's practical meal assistant. Give concise, non-medical cooking suggestions. Never claim allergy safety; tell people with allergies to check labels and cross-contact. Use only these known recipes when recommending a named recipe: ${JSON.stringify(RECIPES.map(r => ({ title:r.title, ingredients:r.ingredients.map(i=>i.name), time:r.prep+r.cook })))}. User message: ${message}. Pantry: ${JSON.stringify(pantry)}. Preferences: ${JSON.stringify(preferences)}. Answer in 100 words or fewer, with a practical next step.`;
-    const ai = await fetch(process.env.VIBEKIT_AI_URL, { method: 'POST', headers: { Authorization: `Bearer ${process.env.VIBEKIT_AI_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: prompt }] }) });
+    if (image && (typeof image !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(image) || image.length > 8_000_000)) return json(res, { error: 'Please choose a smaller JPG, PNG, or WebP photo.' }, 400);
+    const prompt = `You are MindfulMeal's practical meal assistant. ${image ? 'Identify visible food ingredients cautiously; do not guess uncertain items.' : ''} Give concise, non-medical cooking suggestions. Never claim allergy safety; tell people with allergies to check labels and cross-contact. Use only these known recipes when recommending a named recipe: ${JSON.stringify(RECIPES.map(r => ({ title:r.title, ingredients:r.ingredients.map(i=>i.name), time:r.prep+r.cook })))}. User message: ${message}. Pantry: ${JSON.stringify(pantry)}. Preferences: ${JSON.stringify(preferences)}. Answer in 100 words or fewer, with a practical next step.`;
+    const content = image ? [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: image } }] : prompt;
+    const ai = await fetch(process.env.VIBEKIT_AI_URL, { method: 'POST', headers: { Authorization: `Bearer ${process.env.VIBEKIT_AI_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content }] }) });
     const data = await ai.json().catch(() => ({}));
     if (!ai.ok) return json(res, { error: data.error || 'The meal assistant could not answer right now.' }, ai.status);
     json(res, { text: data.text || 'I could not form a useful suggestion. Try a different question.' });
